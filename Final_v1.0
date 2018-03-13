@@ -1,0 +1,892 @@
+/**********************************************************************************
+  Kalkulator AVR v1.2
+  Menggunakan Keypad 4x4
+  Tombol operasi:
+  Tombol A -> +
+  Tombol B -> -
+  Tombol C -> X
+  Tombol D -> /
+  Tombol # -> Enter
+  Tombol * -> To be decided
+  
+  Diagram:
+  Pin 0-3 Keypad -> Pin 11 - 8 Arduino (Urutan harus sama)
+  Pin 4-7 Keypad -> Pin 7 - 4 Arduino (Urutan harus sama)
+  
+  Langkah operasi:
+  1. Masukkan salah satu simbol operator (A / B / C / D pada Keypad)
+  2. Tekan tombol Enter (#) untuk menyimpan operand ke dalam memory OP
+  3. Masukkan angka satu per satu
+  4. Tekan tombol Enter (#) untuk menyimpan nilai ke dalam variabel A
+  5. Masukkan angka satu per satu kembali
+  6. Tekan tombol Enter (#) untuk menyimpan nilai ke dalam variabel B
+  7. Jika hasil dari perhitungan lebih dari 9999, program akan kembali ke awal.
+     Jika tidak, hasil akan ditampilkan di Serial monitor / 7-segment
+     
+  Known bugs :
+  1. Jika tombol tertekan terus, bilangan akan terinput lebih dari 1x.
+  2. Pada saat mengeluarkan variabel result (hasil kalkulasi) ke display, harus dipancing
+     terlebih dahulu menggunakan perintah lain atau melakukan perintah display bilangan
+     lebih dari 1x.
+
+**********************************************************************************/
+// Library
+#include <avr/io.h>
+#include <util/delay.h>
+#include <string.h>
+#define maxLED 4
+
+
+// Deklarasi fungsi dan prosedur
+unsigned int scan_keypad(void); // Fungsi untuk scanning keypad
+void conv_keypad_int(int masukan); // Procedure untuk mengubah nilai input keypad menjadi nilai kolom dan baris dari keypad
+unsigned int clean_keypad(); // Fungsi untuk menyaring nilai floating (tidak jelas) dan mengeluarkan nilai yang jelas
+void geser_led(char masukan[]); // Prosedur untuk menggeser array LED ke kiri sebesar 1x
+void input_bilangan(); // Prosedur untuk mengambil bilangan dari scanner ke program
+unsigned int input_variabel(); // Fungsi untuk mengambil nilai keypad ke memory (variabel)
+char input_operator(); // Fungsi untuk mengambil nilai keypad berupa operator ke memory (variabel)
+void input_kalkulator(); // Fungsi untuk mengambil input bilangan dan operator
+unsigned int kalkulasi(); // Fungsi untuk melakukan kalkulasi
+void display_number(int, int, int, int);
+void cathode_high();
+
+// Fungsi kalkulator
+void input_bilangan(int* masukan); // Fungsi untuk mengambil nilai dari keypad
+unsigned int conv_string_to_int (char masukan[]); // Mengubah nilai string menjadi nilai integer
+
+// Global Variable
+char keypad_map_char[4][4] = {{'1','2','3','+'},
+                              {'4','5','6','-'},
+                              {'7','8','9','X'},
+                              {'C','0','=','/'}};
+unsigned int keypad_map_int[16] = {1,2,3,'+',4,5,6,'-',7,8,9,'/','C',0,'=','/'};
+unsigned int kolom, baris; // Bilangan kolom dan baris untuk memetakan karakter keypad
+unsigned x, y; // Variabel untuk menyimpan bilangan operand
+unsigned int result; // Variabel untuk menyimpan bilanan hasil kalkulasi
+char op; // Variabel untuk menyimpan operator
+
+int push[]      = {A2, A1, A0};             // push[0]=menu, push[1]=select, push[2]=plus, push[3]=minus
+int ledPin      = A4;                   // LED Pin detik
+int halfSecond  = 0;                       // Nilai tiap 500ms
+int loopAlarm;
+
+// Boolean untuk aktifasi setiap event
+bool isProgramRun = false;
+bool select = false;
+bool startCalculator = true;
+bool startJam = true;
+bool flag = true;
+bool doneCalculator = false;
+
+// Variabel pengaturan mode dan timer
+unsigned char mode = 1;
+unsigned long int timer;
+unsigned long int lasttimer=0;
+
+// Konstanta waktu
+signed int jam_satuan, jam_puluhan, menit_satuan, menit_puluhan, detik_puluhan, detik_satuan;
+signed int timer_menitPuluhan, timer_menitSatuan, timer_detikPuluhan, timer_detikSatuan;
+
+long number = 0; //declear the variables
+int first_digit = 0;
+int second_digit = 0;
+int third_digit = 0;
+int fourth_digit = 0;
+int timer_event = 0;
+int CA_1 = 3;
+int CA_2 = 2;
+int CA_3 = 12;
+int CA_4 = 13;
+
+
+int clk = A3;
+int latch = A4;
+int data = A5;
+int count = 0;
+int digits[4];
+int CAS[4] = {3, 2, 12, 13};
+byte numbers[10] {B11111100, B01100000, B11011010, B11110010, B01100110, B10110110, B10111110, B11100000, B11111110, B11110110};
+//byte combinations for each number 0-9
+
+
+// Setup pin input/output
+void setup()
+{
+  Serial.begin(9600);
+  // Pengesetan pin output untuk 7-segmen
+  pinMode(CA_1, OUTPUT);
+  pinMode(CA_2, OUTPUT);
+  pinMode(CA_3, OUTPUT);
+  pinMode(CA_4, OUTPUT);
+  pinMode(clk, OUTPUT);
+  pinMode(latch, OUTPUT);
+  pinMode(data, OUTPUT);
+
+  for (int i=0;i<4;i++)
+  {
+     pinMode (push[i], INPUT);        // Pengesetan input push button
+
+  }
+  pinMode (ledPin,OUTPUT);         // Pengesetan LED
+ 
+  // Stop interrupts
+  cli();
+  
+  // Initialize Timer/Counter Register
+  TCCR1A = 0; // set entire TCCR1A register to 0
+  TCCR1B = 0; // same for TCCR1B
+  TCNT1  = 0; //initialize counter value to 0
+
+  // Turn on CTC mode
+  TCCR1B |= (1 << WGM12);
+  
+  // Set CS12 and CS10 bits for 1024 prescaler
+  TCCR1B |= (1 << CS12) | (1 << CS10);
+  
+  // a value of 15624 in a second. By having OCR1A = 15624 / 2 then the interrupt function
+  OCR1A = 15624 / 2;
+  
+  // Enable timer compare interrupt
+  TIMSK1 |= (1 << OCIE1A);
+
+  // Allow interrupts
+  sei();
+  
+  // SESUAIKAN DENGAN PIN INPUT PADA ARDUINO
+  DDRB = 0xF0; // PB0 - PB3 sebagai input
+  PORTB = 0x0F; // Meng-enable internal pullup resistor pada PB0 - PB3
+  DDRD = 0xFF; // PORTD sebagai output
+  PORTD = 0xFF; // Inisialisasi PORT D = HIGH
+  MCUCR = (0 << PUD); // Enable Global Pull-up
+}
+
+// Prosedur Led On untuk jam digital
+void ledOn()
+{
+  digitalWrite(ledPin,HIGH);
+}
+
+// Prosedur Led oFF`` untuk jam digital
+void ledOff()
+{
+  digitalWrite(ledPin,LOW);
+}
+
+// jam dengan interrupt
+ISR(TIMER1_COMPA_vect)
+{
+  halfSecond++; 
+  
+  if (halfSecond==1) // Untuk kedipan lampu indikator detik
+  {
+    // Untuk mode jam digital led berkedip setiap detik
+    if (mode==1 && isProgramRun)
+    {
+      ledOff(); 
+    }
+  }else if (halfSecond!=1)
+  {
+    halfSecond=0;
+    detik_satuan++;
+    if (mode==1 && isProgramRun)
+    {
+      ledOn(); 
+    }
+    else if (mode==3 && isProgramRun)
+    {
+      timer_detikSatuan--; 
+    }
+  }
+
+  if (mode==1 || mode==2)
+  {
+      if (detik_satuan > 9)
+      {
+        detik_satuan = 0;
+        detik_puluhan++;
+        
+        // nilai detik sudah mencapai 60
+        if(detik_puluhan > 5 ) 
+        {               
+          detik_puluhan = 0;
+          menit_satuan++;
+           
+          if(menit_satuan > 9)
+          {
+            menit_satuan=0;
+            menit_puluhan++;
+        
+          // nilai menit sudah mencapai 60
+            if (menit_puluhan > 5)
+            {
+              menit_puluhan=0;
+              jam_satuan++;
+            
+              if(jam_satuan > 9)
+              {
+                jam_satuan=0;
+                jam_puluhan++;
+        
+                // nilai jam mecapai 24
+                if(jam_puluhan == 2 && jam_satuan== 4)
+                {
+                  jam_puluhan=0;
+                  jam_satuan=0;
+                }
+              }
+            }
+          }
+        }    
+      } 
+  }
+}
+
+// Inisiasi nilai kontanta sama dengan nol
+void init_angka()
+{
+  //inisialisasi nilai detik, menit, jam
+  detik_satuan=0; detik_puluhan=0; 
+  menit_satuan=0; menit_puluhan=0;
+  jam_satuan=0; jam_puluhan=0;
+}
+
+//pengaturan menggunakan push button
+void setting_angka ()
+{
+  unsigned char x = 5; 
+  signed char digit1, digit2, digit3, digit4;
+  unsigned char maksimumDigit1, maksimumDigit2;
+
+  isProgramRun = false;
+  
+  switch (mode)
+  {
+    case 1 : {   // Jam Digital
+              digit1  = jam_puluhan;
+              digit2  = jam_satuan;
+              digit3  = menit_puluhan;
+              digit4  = menit_satuan;
+              maksimumDigit1 = 2;
+              maksimumDigit2 = 9;
+             }
+             break;
+  }
+
+  // Pembacaan tombol mode
+  if(digitalRead(push[1])==0)
+  {
+      delay(200);
+      x=4;
+  }
+    
+  // setting menit satuan atau detik satuan
+  while(x==4) 
+  {   
+      if(digitalRead(push[1])==0) // Tombol select untuk geser digit
+      {
+          delay(200);
+          x=3;
+      }
+  
+      if (digitalRead(push[2])==0) // Tombol plus
+      {
+          delay(200);
+          digit4++;
+          
+          if(digit4>9) 
+            digit4 = 0;
+      }
+      
+      if(digitalRead(push[3])==0) // Tombol minus
+      {
+          delay(200);
+          digit4--;
+          
+          if(digit4<0) 
+            digit4=9;
+      }
+
+      // Menampilkan digit ke empat
+    cathode_high(); //black screen
+    digitalWrite(latch, LOW); //put the shift register to read
+    shiftOut(data, clk, LSBFIRST, numbers[digit4]); //send the data
+    digitalWrite(CAS[3], LOW); //turn on the relevent digit
+    digitalWrite(latch, HIGH); //put the shift register to write mode
+      
+  }
+    
+    // setting menit puluhan
+  while(x==3)
+  {  
+      if(digitalRead(push[1])==0) // Tombol select untuk geser digit
+      {
+          delay(200);
+          x=2;
+      }
+      
+      if (digitalRead(push[2])==0) // Tombol plus
+      {
+          delay(200);
+          digit3++;
+          
+          if(digit3>5) 
+            digit3=0;
+      }
+      
+      if(digitalRead(push[3])==0) // Tombol minus
+      {
+          delay(200);
+          digit3--;
+          
+          if(digit3<0) 
+            digit3=5;
+          
+      }
+
+      // Menampilkan digit ketiga
+    cathode_high(); //black screen
+    digitalWrite(latch, LOW); //put the shift register to read
+    shiftOut(data, clk, LSBFIRST, numbers[digit3]); //send the data
+    digitalWrite(CAS[2], LOW); //turn on the relevent digit
+    digitalWrite(latch, HIGH); //put the shift register to write mode
+  } 
+     
+  // setting jam satuan
+  while(x==2)
+  {     
+    if(digitalRead(push[1])== 0) // Tombol select untuk geser digit
+    {
+      delay(200);
+      x=1;
+    }
+  
+    if (digitalRead(push[2])==0) // Tombol plus
+    {
+      delay(200);
+      digit2++;
+      
+      if(digit2 > maksimumDigit2) 
+      {
+        digit2 = 0;
+      }
+    }
+    
+    if(digitalRead(push[3])==0) // Tombol minus
+    {
+        delay(200);
+        digit2--;
+        
+        if(digit2 < 0)
+        {
+          digit2 = maksimumDigit2; 
+        }    
+    }
+
+    // Menampilkan digit kedua
+    cathode_high(); //black screen
+    digitalWrite(latch, LOW); //put the shift register to read
+    shiftOut(data, clk, LSBFIRST, numbers[digit2]); //send the data
+    digitalWrite(CAS[1], LOW); //turn on the relevent digit
+    digitalWrite(latch, HIGH); //put the shift register to write mode
+  } 
+      
+  // setting jam puluhan  
+  while(x==1)
+  {     
+    if(digitalRead(push[1])==0) // Tombol select untuk geser digit
+    {
+        delay(200);
+        x=5;
+        //detik_satuan=0;
+        //detik_puluhan=0;
+    }
+  
+    if (digitalRead(push[2])==0) // Tombol plus
+    {
+        delay(200);
+        digit1++;
+        
+        if(digit1 > maksimumDigit1)
+        {
+          digit1 = 0;  
+        }
+    }
+    
+    if(digitalRead(push[3])==0) // Tombol minus
+    {
+        delay(200);
+        digit1--;
+        
+        if(digit1 < 0) 
+          digit1 = maksimumDigit1;          
+    }
+    
+    // Menampilkan digit kesatu
+    cathode_high(); //black screen
+    digitalWrite(latch, LOW); //put the shift register to read
+    shiftOut(data, clk, LSBFIRST, numbers[digit1]); //send the data
+    digitalWrite(CAS[0], LOW); //turn on the relevent digit
+    digitalWrite(latch, HIGH); //put the shift register to write mode
+  }
+
+  // Mengisi nilai konstanta waktu dengan hasil setting oleh user
+  if (mode==1)
+  {
+    jam_puluhan = digit1;
+    jam_satuan = digit2;
+    menit_puluhan = digit3;
+    menit_satuan = digit4;
+    detik_puluhan = 0;
+    detik_satuan = 0;
+    halfSecond = 0;
+  } 
+  else if (mode==2)
+  {
+    timer_menitPuluhan = digit1;
+    timer_menitSatuan = digit2;
+    timer_detikPuluhan = digit3;
+    timer_detikSatuan = digit4;
+    halfSecond = 0;
+  }
+  
+  halfSecond = 0;
+}
+
+/* Function and Procedure Implementation */
+unsigned int scan_keypad(void) {
+  /* Memeriksa nilai keypad yang ditekan dengan metode scanning,
+     yaitu dengan melakukan scanning dari tiap kolom dan mencari
+     nilai low dari masing-masing baris. Nilai low dari lokasi baris
+     dan kolom tersebut merupakan nilai yang keluarkan dalam fungsi. */
+  
+  // Deklarasi variabel lokal
+  unsigned int i, j, cek, result;
+  
+  // Inisialisasi variabel
+  result = 0; // Inisialisasi nilai hasil
+  i = 0; // Inisialisasi nilai kolom 
+  
+  // Scanning Keypad
+  while (i < 4) { // Ada 4 kolom yang harus di scan
+    j = 0; // Inisialisasi nilai baris
+    if (i == 0) {
+      PORTD = 0xEF; // SESUAIKAN DENGAN PORT OUTPUT YANG DIGUNAKAN
+    }
+    else if (i == 1) {
+      PORTD = 0xDF; // SESUAIKAN DENGAN PORT OUTPUT YANG DIGUNAKAN
+    }
+    else if (i == 2) {
+      PORTD = 0xBF; // SESUAIKAN DENGAN PORT OUTPUT YANG DIGUNAKAN
+    }
+    else if (i == 3) {
+      PORTD = 0x7F; // SESUAIKAN DENGAN PORT OUTPUT YANG DIGUNAKAN
+    }
+    while (j < 4) { // Ada 4 baris yang harus di scan
+      // SEKALI LAGI SESUAIKAN PIN INPUT YANG DIGUNAKAN
+      if (bit_is_clear(PINB,j)) { // Saat PINB(j) bernilai 0 (PINB initial high karena internall pull-up)
+        result += (j + (1 + (4 * i))); // Nilai standar keypad dari 0 - 16
+        i = 4; // Langsung keluar loop
+      }
+      j++; // Lanjut ke baris lain jika tidak ditemukan
+    }
+    i++;
+  }
+  
+  // Cek nilai
+  if (result > 0) { // Apabila result lebih dari nol,
+    return result;
+  }
+  else { // Jika tidak
+    return 0; // Kembalikan nilai 0
+  }
+}
+
+void conv_keypad_int(int masukan) {
+  /* Mengubah nilai keypad menjadi nilai baris dan kolom untuk dipetakan kepada array keypad_map */
+  switch (masukan) {
+    case (1) :
+      baris = 0;
+      kolom = 0;
+      break;
+    case (2) :
+      baris = 0;
+      kolom = 1;
+      break;
+    case (3) :
+      baris = 0;
+      kolom = 2;
+      break;
+    case (4) :
+      baris = 0;
+      kolom = 3;
+      break;
+    case (5) :
+      baris = 1;
+      kolom = 0;
+      break;
+    case (6) :
+      baris = 1;
+      kolom = 1;
+      break;
+    case (7) :
+      baris = 1;
+      kolom = 2;
+      break;
+    case (8) :
+      baris = 1;
+      kolom = 3;
+      break;
+    case (9) :
+      baris = 2;
+      kolom = 0;
+      break;
+    case (10) :
+      baris = 2;
+      kolom = 1;
+      break;
+    case (11) :
+      baris = 2;
+      kolom = 2;
+      break;
+    case (12) :
+      baris = 2;
+      kolom = 3;
+      break;
+    case (13) :
+      baris = 3;
+      kolom = 0;
+      break;
+    case (14) :
+      baris = 3;
+      kolom = 1;
+      break;
+    case (15) :
+      baris = 3;
+      kolom = 2;
+      break;
+    case (16) :
+      baris = 3;
+      kolom = 3;
+      break;
+  }
+}
+
+unsigned int clean_keypad() {
+  /* Menyaring nilai keypad dengan metode polling.
+     Nilai keluar dari keypad setelah nilai keypad bernilai sama dengan
+     nilai temp dengan nilai kesamaan lebih dari 90% dengan resolusi 1/100 */
+  
+  // Deklarasi variabel lokal
+  unsigned int n; // Nilai kesamaan
+  unsigned int temp; // Variabel sementara nilai scan keypad yang akan dicocokan
+  
+  // Inisialisasi variabel awal
+  n = 0;
+  temp = scan_keypad();
+  
+  // Polling nilai scan keypad
+  while (n < 100) {
+    if (temp == scan_keypad()) { // Jika sama, nilai kesamaan bertambah satu
+      n++;
+    }
+    else return 0; // Jika tidak sama, keluar dari fungsi dengan mengembalikan nilai 0
+  }
+  
+  if (n > 90) {
+    return temp; // Jika nilai kesamaan >90%, keluarkan nilai scan keypad yang benar
+  }
+  else return 0;
+}
+
+void input_bilangan(int* masukan) {
+  /* Mengambil input dari scanner agar tidak floating */
+  unsigned int status; // Boolean apakah sudah membaca nilai dari keypad dengan baik atau belum
+  status = 0;
+  while (status == 0) {
+    status = clean_keypad();
+    int x_sat = x % 10;
+    int x_pul = (x / 10) % 10;
+    {
+      display_number(10, 10, x_pul, x_sat);
+    }
+  }
+  *masukan = status;
+  return;
+}
+
+void geser_led (char masukan[]) {
+  // Menggeser array karakter dari output[1] (urutan ke-2) ke kiri sebesar 1x
+  unsigned int i = 0;
+  // Algoritma menggeser
+  masukan[0] = masukan[1];
+  return;
+}
+
+unsigned int conv_string_to_int (char masukan[]) {
+  /* Mengubah array of char LED menjadi bilangan integer */
+  
+  // Deklarasi variabel
+  unsigned int i;
+  unsigned int result;
+  char temp[2]; // Tempat sementara untuk array of char LED
+  
+  strcpy(temp,masukan);
+  
+  // Menggeser bilangan menuju paling kiri bila bilangan kurang dari 4 digit
+  while (temp[0] == 'X') {
+    temp[0] = temp[1];
+    temp[1] = 'X';
+  }
+  
+  // Mengganti karakter 'X' menjadi '\0' (karakter null) agar bisa dibaca oleh
+  // fungsi atoi
+  for (i = 0;i < 2;i++) {
+    if ((temp[i] != '1') && (temp[i] != '2') && (temp[i] != '3') && (temp[i] != '4') && (temp[i] != '5') && (temp[i] != '6') && (temp[i] != '7') && (temp[i] != '8') && (temp[i] != '9') && (temp[i] != '0')) {
+      temp[i] = '\0';
+    }
+  }
+  
+  // Meengembalikan hasil
+  result = atoi(temp);
+  return result;
+}
+
+unsigned int input_variabel() {
+  /*  Mengambil input dari keypad hingga diberi tanda untuk memasukkan
+    bilangan ke memory */
+  char bilangan[2];
+  unsigned int keypad;
+
+  // Jika tombol bukan *, lakukan input kembali
+  strcpy(bilangan,"XX");
+  // Output LED terkini
+  Serial.println(bilangan); // RUBAH BAGIAN INI UNTUK OUTPUT
+
+  
+  input_bilangan(&keypad); // Input keypad
+  while ((keypad != 15)) {
+    conv_keypad_int(keypad); // mengubah nilai keypad menjadi nilai baris dan kolom
+    geser_led(bilangan); // Menggeser output ke kiri sebesar 1x agar dapat dimasukkan input bilangan kembali
+    bilangan[1] = keypad_map_char[baris][kolom]; // Memasukkan karakter angka ke array paling kiri
+    Serial.println(bilangan); // RUBAH BAGIAN INI UNTUK OUTPUT
+    _delay_ms(100);
+    input_bilangan(&keypad);
+    _delay_ms(100);
+
+  }
+    
+  // Mengembalikan hasil input bilangan
+  return conv_string_to_int(bilangan);
+}
+
+char input_operator() {
+  /* Melakukan input karakter operator dengan langkah yang sama dengan input variabel */
+  char character = '?';
+  char temp;
+  unsigned int keypad;
+  
+  Serial.println(character); // RUBAH BAGIAN INI UNTUK OUTPUT
+  input_bilangan(&keypad); // Input operator pertama kali
+  
+  while ((keypad != 15)) 
+  {
+    conv_keypad_int(keypad); // Mendapatkan nilai baris dan kolom
+    character = keypad_map_char[baris][kolom]; // Memetakan menjadi karakter
+    temp = keypad_map_char[baris][kolom]; // Disimpan ke variabel sementara
+    Serial.println(character); // RUBAH BAGIAN INI UNTUK OUTPUT
+    _delay_ms(100);
+    input_bilangan(&keypad);
+    _delay_ms(100);
+  }
+
+  // Jika telah ditekan '#' / Enter, kembalikan operator yang telah disimpan sebelumnya
+  if (keypad == 15) {
+    return temp;
+  }
+}
+
+void input_kalkulator() {
+  /* Prosedur untuk menginput bilangan dan operator pada kalkulator */
+  Serial.print("OP"); // SESUAIKAN DENGAN OUTPUT 7-SEGMENT
+  op = input_operator(); 
+  _delay_ms(100);
+  
+  Serial.print("A="); // SESUAIKAN DENGAN OUTPUT 7-SEGMENT
+  x = input_variabel(); 
+  y = x;
+  
+  Serial.print("B="); // SESUAIKAN DENGAN OUTPUT 7-SEGMENT
+  x = input_variabel();
+  delay(100);
+}
+
+unsigned int kalkulasi() {  
+  // Operasi kalkulasi bilangan operand dengan pilihan operator
+  if (op == '+') {
+    return x+y;
+  }
+  else if (op == '-') {
+    return x-y;
+  }
+  else if (op == 'X') {
+    return x*y;
+  }
+  else if (op == '/') {
+    return x/y;
+  }
+  else return 0;
+}
+
+// Menampilakn angka pada 7-segment
+void display_number(int a, int b, int c, int d) { //scanning
+
+  cathode_high(); //black screen
+  digitalWrite(latch, LOW); //put the shift register to read
+  shiftOut(data, clk, LSBFIRST, numbers[a]); //send the data
+  digitalWrite(CAS[0], LOW); //turn on the relevent digit
+  digitalWrite(latch, HIGH); //put the shift register to write mode
+  delay(5);
+
+  cathode_high(); //black screen
+  digitalWrite(latch, LOW); //put the shift register to read
+  shiftOut(data, clk, LSBFIRST, numbers[b]); //send the data
+  digitalWrite(CAS[1], LOW); //turn on the relevent digit
+  digitalWrite(latch, HIGH); //put the shift register to write mode
+  delay(5);
+
+  cathode_high(); //black screen
+  digitalWrite(latch, LOW); //put the shift register to read
+  shiftOut(data, clk, LSBFIRST, numbers[c]); //send the data
+  digitalWrite(CAS[2], LOW); //turn on the relevent digit
+  digitalWrite(latch, HIGH); //put the shift register to write mode
+  delay(5);
+  
+  cathode_high(); //black screen
+  digitalWrite(latch, LOW); //put the shift register to read
+  shiftOut(data, clk, LSBFIRST, numbers[d]); //send the data
+  digitalWrite(CAS[3], LOW); //turn on the relevent digit
+  digitalWrite(latch, HIGH); //put the shift register to write mode
+  delay(5);
+}
+
+void cathode_high() { //turn off all 4 digits
+  digitalWrite(CA_1, HIGH);
+  digitalWrite(CA_2, HIGH);
+  digitalWrite(CA_3, HIGH);
+  digitalWrite(CA_4, HIGH);
+}
+
+// Program cek mode (1. Jam Digital, 2. Calculator)
+void cekMode()
+{ 
+  startJam = true;
+  startCalculator = true;
+  isProgramRun = false;
+  ledOff();
+
+  // Looping hingga dipilih mode dengan menekan tombol select
+  while (!select)
+  {
+    display_number(10, 10, 10, mode);
+    if (digitalRead(push[0])==0)
+    {
+      delay(150);
+      mode++;
+      if (mode>3)
+      {
+        mode=1;
+      }
+    }
+    // Jika ditekan select maka akan keluar loop
+    if (digitalRead(push[1])==0)
+    {
+      select = true;
+    }
+  }
+}
+
+// Program Running dari setiap mode yang dipilih
+void runningProgram()
+{
+  switch (mode)
+  {
+    case 1 : {  // Set Jam
+                init_angka();
+                setting_angka();
+                isProgramRun = true;
+   
+             }
+             break;
+    case 2 : {  
+              // Jam Digital
+                
+                isProgramRun = true;
+                while (startJam)
+                {
+                  if (jam_puluhan==2 && jam_satuan>3)
+                  {
+                    init_angka();
+                  }
+                  display_number(jam_puluhan, jam_satuan, menit_puluhan, menit_satuan); 
+                  if (digitalRead(push[1]) == 0)
+                  {
+                    
+                    isProgramRun = true;
+                  }
+                  if (digitalRead(push[0]) == 0)
+                  {
+                    startJam = false; 
+                  }
+                }
+             }
+             break;
+    case 3 : {// Calculator
+                isProgramRun = true;
+                while (startCalculator)
+                {// jalankan input kalkulator
+                  input_kalkulator();
+                   // Lakukan kalkulasi kalkulator dan simpan hasilnya pada input
+                  result = kalkulasi();
+                  // Display pada Serial monitor / 7-segment (SESUAIKAN BAGIAN INI)
+
+                  Serial.print(x);
+                  Serial.print(op);
+                  Serial.print(y);
+                  Serial.print("=");
+                  Serial.println(result);
+  
+                  int r_sat = result % 10;
+                  int r_pul = (result / 10) % 10;
+                  int r_rat = (result / 100) % 10;
+                  int r_rib = (result / 1000) % 10;
+                
+                  while(digitalRead(push[0]) != 0)
+                  {
+                    display_number(r_rib, r_rat, r_pul, r_sat);
+                  }
+                  if (digitalRead(push[1]) == 0)
+                  {
+                    
+                    isProgramRun = true;
+                  }
+                  if (digitalRead(push[0]) == 0)
+                  {
+                    startJam = false; 
+                  }
+                }
+             }
+             break;
+  }
+
+  select = false;
+}
+
+// Program Utama
+void loop() 
+{ 
+  cekMode();
+  runningProgram(); 
+}
+
+
+
